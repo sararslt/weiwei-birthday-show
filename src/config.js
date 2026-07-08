@@ -19,8 +19,8 @@ export default {
       cat: { start: 13.8, morph: 1.8, hold: 5 },
       /** 合影：group.png */
       finale: { start: 20.6, morph: 2.2, hold: 5 },
-      /** 最后：生日快乐文字 */
-      text: { start: 27.8, morph: 1.8, hold: 5 },
+      /** 最后：生日快乐文字（打字机效果） */
+      text: { start: 27.8, morph: 2.8, hold: 5 },
     },
     audio: {
       /** 开场粒子音效后再播生日歌 */
@@ -61,8 +61,17 @@ export default {
   /** cat/text 汇聚：与 weiwei 同款柔和光晕粒子（旧版见 git tag effects-backup） */
   textParticleSize: 0.0026,
   catParticleSize: 0.0036,
-  groupParticleSize: 0.0036,
-  /** 文字：粒子汇聚 → 原图停留 */
+  groupParticleSize: 0.0045,
+  /** 合影：更亮、对比更强，暗屏也能看清 */
+  groupVisual: {
+    particleSize: 0.0045,
+    colorBoost: 2.05,
+    colorLift: 0.16,
+    sampleGain: 1.35,
+    sampleLift: 0.12,
+    starFade: 0.05,
+  },
+  /** 文字：透明背景 + 柔和粒子（与 cat 同款） */
   textView: {
     width: 4.2,
     height: 2.9,
@@ -70,7 +79,29 @@ export default {
     offsetX: 0,
     offsetY: 0.2,
   },
-  /** 猫+蛋糕：粒子汇聚 → 原图停留 */
+  /** 文字：透明背景 + 柔和粒子，打字完成后持续动态光效 */
+  textVisual: {
+    particleSize: 0.0028,
+    colorBoost: 1.45,
+    colorLift: 0.06,
+    additive: true,
+    flowIntensity: 0.014,
+    wave: 0.0055,
+    colorPulse: 0.26,
+    fireworksBoost: 1.45,
+    fireworks: {
+      z: -3.6,
+      size: 0.1,
+      spread: 1.25,
+      edgeBias: true,
+      opacity: 1,
+    },
+  },
+  /** 打字机：从左到右逐字显现 */
+  textTypewriter: {
+    charCount: 4,
+  },
+  /** 猫+蛋糕：透明背景 + 柔和粒子 */
   catView: {
     width: 3.0,
     height: 2.8,

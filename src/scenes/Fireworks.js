@@ -15,6 +15,10 @@ export default class Fireworks {
     this.active = false;
     this.time = 0;
     this.nextBurst = 0;
+    this.burstBoost = 1;
+    this.spread = 1;
+    this.edgeBias = false;
+    this.baseSize = 0.075;
 
     this.positions = new Float32Array(count * 3);
     this.colors = new Float32Array(count * 3);
@@ -23,7 +27,7 @@ export default class Fireworks {
     this.maxLife = new Float32Array(count);
 
     this.group = new THREE.Group();
-    this.group.position.z = -8;
+    this.group.position.z = -3.8;
     this._buildPoints();
     this.group.add(this.points);
     this.group.visible = false;
@@ -46,18 +50,21 @@ export default class Fireworks {
     ctx.fillRect(0, 0, 32, 32);
 
     this.material = new THREE.PointsMaterial({
-      size: 0.055,
+      size: this.baseSize,
       map: new THREE.CanvasTexture(canvas),
       vertexColors: true,
       transparent: true,
       opacity: 0.95,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
+      depthTest: true,
       sizeAttenuation: true,
       fog: false,
     });
 
     this.points = new THREE.Points(geometry, this.material);
+    this.points.renderOrder = 0;
+    this.points.frustumCulled = false;
   }
 
   start() {
@@ -68,12 +75,41 @@ export default class Fireworks {
     this._spawnBurst(12);
   }
 
+  ensureRunning() {
+    if (!this.active) {
+      this.start();
+      return;
+    }
+    this.group.visible = true;
+  }
+
+  setBurstBoost(boost = 1) {
+    this.burstBoost = Math.max(0.5, boost);
+  }
+
+  setPresentation({ z, size, spread, edgeBias, opacity } = {}) {
+    if (z != null) this.group.position.z = z;
+    if (size != null) {
+      this.baseSize = size;
+      this.material.size = size;
+    }
+    if (spread != null) this.spread = spread;
+    if (edgeBias != null) this.edgeBias = edgeBias;
+    if (opacity != null) this.material.opacity = opacity;
+  }
+
   _spawnBurst(n) {
     for (let b = 0; b < n; b++) {
       const i = Math.floor(Math.random() * this.count);
       const i3 = i * 3;
-      const cx = (Math.random() - 0.5) * 14;
-      const cy = (Math.random() - 0.5) * 8 + 1;
+      let cx = (Math.random() - 0.5) * 14 * this.spread;
+      let cy = (Math.random() - 0.5) * 8 * this.spread + 1;
+
+      if (this.edgeBias && Math.random() > 0.3) {
+        cx = (Math.random() > 0.5 ? 1 : -1) * (3.5 + Math.random() * 4.5);
+        cy = (Math.random() - 0.5) * 9 * this.spread;
+      }
+
       const c = COLORS[Math.floor(Math.random() * COLORS.length)];
 
       this.positions[i3] = cx;
@@ -100,8 +136,10 @@ export default class Fireworks {
 
     this.time += dt;
     if (this.time >= this.nextBurst) {
-      this._spawnBurst(8 + Math.floor(Math.random() * 6));
-      this.nextBurst = this.time + 0.35 + Math.random() * 0.45;
+      const n = Math.floor((8 + Math.random() * 6) * this.burstBoost);
+      this._spawnBurst(n);
+      this.nextBurst =
+        this.time + (0.35 + Math.random() * 0.45) / this.burstBoost;
     }
 
     for (let i = 0; i < this.count; i++) {

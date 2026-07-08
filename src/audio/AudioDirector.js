@@ -77,8 +77,13 @@ export default class AudioDirector {
       case "seal":
       case "weiwei":
       case "cat":
-      case "text":
         this.sfx.playGather();
+        break;
+      case "text":
+        this.sfx.playTypewriter({
+          chars: config.textTypewriter?.charCount ?? 4,
+          duration: config.timeline.phases.text.morph,
+        });
         break;
       case "finale":
         this.sfx.playCelebrate();

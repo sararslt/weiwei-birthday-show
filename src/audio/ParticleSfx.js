@@ -102,6 +102,42 @@ export default class ParticleSfx {
     this._playSparkle(0.04, 0.04, 7);
   }
 
+  playTypewriter({ chars = 4, duration = 2.8 } = {}) {
+    if (!this.ctx) return;
+    const interval = duration / (chars + 0.5);
+    for (let i = 0; i < chars; i++) {
+      this._playTypeClick(i * interval);
+    }
+  }
+
+  _playTypeClick(delay = 0) {
+    const t = this._now() + delay;
+
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = "square";
+    osc.frequency.setValueAtTime(920 + Math.random() * 80, t);
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(0.045, t + 0.008);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.05);
+    osc.connect(gain).connect(this.master);
+    osc.start(t);
+    osc.stop(t + 0.06);
+
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.noiseBuffer;
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = "highpass";
+    filter.frequency.value = 1800;
+    const nGain = this.ctx.createGain();
+    nGain.gain.setValueAtTime(0.0001, t);
+    nGain.gain.exponentialRampToValueAtTime(0.025, t + 0.004);
+    nGain.gain.exponentialRampToValueAtTime(0.0001, t + 0.035);
+    src.connect(filter).connect(nGain).connect(this.master);
+    src.start(t);
+    src.stop(t + 0.04);
+  }
+
   _playToneSweep({
     startHz,
     endHz,

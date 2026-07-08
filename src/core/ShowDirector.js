@@ -8,19 +8,9 @@ import {
   loadProcessedCatImage,
 } from "../utils/processHoldImage.js";
 import ParticleSystem from "./ParticleSystem.js";
-import SharpImageLayer from "../scenes/SharpImageLayer.js";
 import Fireworks from "../scenes/Fireworks.js";
 import { easeInOutCubic, lerp } from "../utils/easing.js";
-
-function createSharpLayer(asset, view) {
-  return new SharpImageLayer(
-    asset,
-    view.width,
-    view.height,
-    view.offsetX ?? 0,
-    view.offsetY ?? 0
-  );
-}
+import { boostPointColors } from "../utils/boostPointColors.js";
 
 export default class ShowDirector {
   constructor({ scene, camera, timeline, cosmicScene }) {
@@ -40,10 +30,9 @@ export default class ShowDirector {
     this.mainParticles.setOpacity(0);
 
     this.fireworks = new Fireworks(6000);
-    this.textSharp = null;
 
-    this.scene.add(this.mainParticles.group);
     this.scene.add(this.fireworks.group);
+    this.scene.add(this.mainParticles.group);
 
     this._loadAssets();
   }
@@ -73,15 +62,12 @@ export default class ShowDirector {
           }),
           loadProcessedCatImage(assets.cat),
           loadProcessedTextImage(assets.text),
-          loadShapePoints(assets.group, particleCount, "fill-sharp", {
+          loadShapePoints(assets.group, particleCount, "fill", {
             sampleMaxSize: sampleMax,
             useNative: true,
             fitView: groupView,
           }),
         ]);
-
-      this.textSharp = createSharpLayer(textProcessed.canvas, textView);
-      this.scene.add(this.textSharp.group);
 
       const textRaw = loadShapePointsFromCanvas(
         textProcessed.ctx,
@@ -105,7 +91,10 @@ export default class ShowDirector {
       this.weiweiPoints = weiwei;
       this.catPoints = cat;
       this.textPoints = textRaw;
-      this.groupPoints = group;
+      this.groupPoints = boostPointColors(group, {
+        gain: config.groupVisual.sampleGain,
+        lift: config.groupVisual.sampleLift,
+      });
 
       this.ready = true;
       this._flushPendingPhases();
@@ -136,28 +125,74 @@ export default class ShowDirector {
   }
 
   _hideAllSharpLayers() {
-    this.textSharp?.hide();
     this.mainParticles.setOpacity(1);
   }
 
-  _showTextSharp() {
-    this.mainParticles.setOpacity(0);
-    this.textSharp?.show(1);
-  }
-
-  _hideTextSharp() {
-    this.textSharp?.hide();
+  _setTextParticleMode() {
+    const tv = config.textVisual;
+    this.mainParticles.resetEnhancements();
+    this.mainParticles.setSharpRender(false);
+    this.mainParticles.setColorBoost(tv.colorBoost, tv.colorLift);
+    if (tv.additive) this.mainParticles.setAdditiveBlend(true);
+    this.mainParticles.setSize(tv.particleSize ?? config.textParticleSize);
+    this.mainParticles.setTextFlowOptions({
+      intensity: tv.flowIntensity,
+      wave: tv.wave,
+      colorPulse: tv.colorPulse,
+    });
     this.mainParticles.setOpacity(1);
   }
 
-  _applyTextHold(points, morphEnd, elapsed) {
-    this.mainParticles.group.visible = true;
-    this.mainParticles.setBaseShapeWithColors(points);
+  _finishTextReveal() {
     this.mainParticles.hold();
+    this.mainParticles.resumeTextFlow();
+  }
+
+  _ensureFireworks(boost = 1, { textPhase = false } = {}) {
+    this.fireworks.ensureRunning();
+    this.fireworks.setBurstBoost(boost);
+
+    if (textPhase) {
+      const fw = config.textVisual?.fireworks ?? {};
+      this.fireworks.setPresentation({
+        z: fw.z ?? -3.6,
+        size: fw.size ?? 0.1,
+        spread: fw.spread ?? 1.25,
+        edgeBias: fw.edgeBias ?? true,
+        opacity: fw.opacity ?? 1,
+      });
+      return;
+    }
+
+    this.fireworks.setPresentation({
+      z: -4.2,
+      size: 0.075,
+      spread: 1,
+      edgeBias: false,
+      opacity: 0.95,
+    });
+  }
+
+  _applyTextTypewriterHold(points, morphStart, morphDuration, elapsed) {
+    this._ensureFireworks(config.textVisual?.fireworksBoost ?? 1.45, {
+      textPhase: true,
+    });
+    this.mainParticles.group.visible = true;
+    this.mainParticles.setOpacity(1);
+
+    const morphEnd = morphStart + morphDuration;
     if (elapsed >= morphEnd) {
-      this._showTextSharp();
-    } else {
-      this._hideTextSharp();
+      this.mainParticles.setBaseShapeWithColors(points);
+      this._finishTextReveal();
+      return;
+    }
+
+    if (elapsed >= morphStart) {
+      this.mainParticles.syncTypewriterAt(
+        points,
+        morphDuration,
+        elapsed - morphStart
+      );
     }
   }
 
@@ -176,13 +211,14 @@ export default class ShowDirector {
 
     if (elapsed >= phases.text.start) {
       this.inFinale = true;
-      const morphEnd = phases.text.start + phases.text.morph;
-      if (elapsed < morphEnd) {
-        this._setSoftParticleMode();
-      }
-      this._applyTextHold(
+      this._ensureFireworks(config.textVisual?.fireworksBoost ?? 1.45, {
+      textPhase: true,
+    });
+      this._setTextParticleMode();
+      this._applyTextTypewriterHold(
         this.textPoints,
-        morphEnd,
+        phases.text.start,
+        phases.text.morph,
         elapsed
       );
       return;
@@ -190,9 +226,10 @@ export default class ShowDirector {
 
     if (elapsed >= phases.finale.start) {
       this.inFinale = true;
+      this._ensureFireworks(1);
       this.finaleCameraZ = config.finaleLayout.cameraZ;
       this._hideAllSharpLayers();
-      this._setDetailMode(true, config.groupParticleSize);
+      this._setGroupParticleMode();
       this.mainParticles.group.visible = true;
       this.mainParticles.setOpacity(1);
 
@@ -233,7 +270,18 @@ export default class ShowDirector {
   }
 
   _setSoftParticleMode() {
+    this.mainParticles.resetEnhancements();
     this._setDetailMode(false, config.particleSize);
+  }
+
+  _setGroupParticleMode() {
+    const g = config.groupVisual;
+    this.mainParticles.resetEnhancements();
+    this.mainParticles.setSharpRender(false);
+    this.mainParticles.setColorBoost(g.colorBoost, g.colorLift);
+    this.mainParticles.setAdditiveBlend(true);
+    this.mainParticles.setSize(g.particleSize);
+    this.mainParticles.setOpacity(1);
   }
 
   _setDetailMode(enabled, size = config.particleSize) {
@@ -281,21 +329,27 @@ export default class ShowDirector {
         this._hideAllSharpLayers();
         this.inFinale = true;
         this.finaleCameraZ = config.finaleLayout.cameraZ;
-        this._setDetailMode(true, config.groupParticleSize);
+        this._setGroupParticleMode();
         this.mainParticles.setOpacity(1);
         this.mainParticles.morphTo(this.groupPoints, phases.finale.morph, () => {
           this.mainParticles.hold();
           this.mainParticles.resumeFlow();
         });
         this.fireworks.start();
+        this.fireworks.setBurstBoost(1);
         break;
       case "text":
-        this._hideTextSharp();
-        this._setSoftParticleMode();
-        this.mainParticles.morphTo(this.textPoints, phases.text.morph, () => {
-          this.mainParticles.hold();
-          this._showTextSharp();
-        });
+        this._hideAllSharpLayers();
+        this.inFinale = true;
+        this._ensureFireworks(config.textVisual?.fireworksBoost ?? 1.45, {
+      textPhase: true,
+    });
+        this._setTextParticleMode();
+        this.mainParticles.morphToTypewriter(
+          this.textPoints,
+          phases.text.morph,
+          () => this._finishTextReveal()
+        );
         break;
       default:
         break;
@@ -314,13 +368,41 @@ export default class ShowDirector {
 
   update(elapsed, delta) {
     this._updateCamera(elapsed);
-    this.cosmicScene.setFade(Math.max(0.12, 1 - elapsed / 3));
+
+    const phases = config.timeline.phases;
+    let starFade = Math.max(0.12, 1 - elapsed / 3);
+    const textEnd =
+      phases.text.start + phases.text.morph + phases.text.hold;
+    if (elapsed >= phases.finale.start && elapsed < textEnd) {
+      starFade = Math.min(starFade, config.groupVisual.starFade);
+    }
+    this.cosmicScene.setFade(starFade);
 
     if (elapsed >= config.timeline.phases.seal.start) {
       this.mainParticles.update(delta);
     }
 
-    if (this.inFinale || elapsed >= config.timeline.phases.finale.start) {
+    if (
+      elapsed >= phases.text.start ||
+      this.inFinale ||
+      elapsed >= phases.finale.start
+    ) {
+      const boost =
+        elapsed >= phases.text.start
+          ? config.textVisual?.fireworksBoost ?? 1.45
+          : 1;
+      const textPhase = elapsed >= phases.text.start;
+      this.fireworks.setBurstBoost(boost);
+      if (textPhase) {
+        const fw = config.textVisual?.fireworks ?? {};
+        this.fireworks.setPresentation({
+          z: fw.z ?? -3.6,
+          size: fw.size ?? 0.1,
+          spread: fw.spread ?? 1.25,
+          edgeBias: fw.edgeBias ?? true,
+          opacity: fw.opacity ?? 1,
+        });
+      }
       this.fireworks.update(delta);
     }
   }

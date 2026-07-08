@@ -32,6 +32,17 @@ export default class ParticleSystem {
     this.explodeStartTime = 0;
     this.explodeDuration = 1.6;
     this.onMorphComplete = null;
+    this.colorBoost = null;
+    this.colorLift = 0;
+    this.typewriterMode = false;
+    this.targetColors = new Float32Array(count * 3);
+    this.baseColors = new Float32Array(count * 3);
+    this.flowProfile = "default";
+    this.textFlow = {
+      intensity: 0.013,
+      wave: 0.005,
+      colorPulse: 0.24,
+    };
 
     for (let i = 0; i < count; i++) {
       this.phases[i] = Math.random() * Math.PI * 2;
@@ -59,11 +70,14 @@ export default class ParticleSystem {
       opacity: 0.98,
       blending: THREE.NormalBlending,
       depthWrite: false,
+      depthTest: true,
       sizeAttenuation: true,
       fog: false,
     });
 
     this.points = new THREE.Points(geometry, material);
+    this.points.renderOrder = 2;
+    this.points.frustumCulled = false;
     this.material = material;
   }
 
@@ -118,6 +132,39 @@ export default class ParticleSystem {
     this.material.size = size;
   }
 
+  setColorBoost(boost, lift = 0) {
+    this.colorBoost = boost;
+    this.colorLift = lift;
+  }
+
+  setAdditiveBlend(enabled) {
+    this.material.blending = enabled
+      ? THREE.AdditiveBlending
+      : THREE.NormalBlending;
+    this.material.needsUpdate = true;
+  }
+
+  resetEnhancements() {
+    this.colorBoost = null;
+    this.colorLift = 0;
+    this.setAdditiveBlend(false);
+    this.flowProfile = "default";
+    this.flowIntensity = 0.006;
+  }
+
+  setTextFlowOptions({ intensity, wave, colorPulse } = {}) {
+    if (intensity != null) this.textFlow.intensity = intensity;
+    if (wave != null) this.textFlow.wave = wave;
+    if (colorPulse != null) this.textFlow.colorPulse = colorPulse;
+  }
+
+  resumeTextFlow() {
+    this.baseColors.set(this.colors);
+    this.flowProfile = "text";
+    this.flowIntensity = this.textFlow.intensity;
+    this.mode = MODES.FLOW;
+  }
+
   setRandomPositions(spread = 8) {
     for (let i = 0; i < this.count; i++) {
       const i3 = i * 3;
@@ -154,8 +201,85 @@ export default class ParticleSystem {
   }
 
   morphTo(points, duration = 2.5, onComplete = null) {
+    this.typewriterMode = false;
     this.setTargetFromPoints(points);
     this.startMorph(onComplete, duration);
+  }
+
+  morphToTypewriter(points, duration = 2.5, onComplete = null) {
+    this.typewriterMode = true;
+    this.setTargetFromPoints(points);
+    this.targetColors.set(this.colors);
+
+    const { delays, perStroke } = this._computeTypewriterTiming(points, duration);
+    this.mode = MODES.MORPH;
+    this.morphStartTime = this.time;
+    this.onMorphComplete = onComplete;
+    this.morphDuration = perStroke;
+
+    for (let i = 0; i < this.count; i++) {
+      const i3 = i * 3;
+      const tx = this.targetPositions[i3];
+      const ty = this.targetPositions[i3 + 1];
+      const tz = this.targetPositions[i3 + 2];
+
+      this.morphFrom[i3] = tx - 0.06 - Math.random() * 0.03;
+      this.morphFrom[i3 + 1] = ty + (Math.random() - 0.5) * 0.015;
+      this.morphFrom[i3 + 2] = tz;
+      this.morphProgress[i] = delays[i];
+
+      this.positions[i3] = this.morphFrom[i3];
+      this.positions[i3 + 1] = this.morphFrom[i3 + 1];
+      this.positions[i3 + 2] = this.morphFrom[i3 + 2];
+      this._setColor(i, 0, 0, 0);
+    }
+
+    this._commitPositions();
+    this._commitColors();
+  }
+
+  syncTypewriterAt(points, duration, elapsedOffset) {
+    this.morphToTypewriter(points, duration, null);
+    this.morphStartTime = this.time - elapsedOffset;
+
+    const { totalDuration } = this._computeTypewriterTiming(points, duration);
+    if (elapsedOffset >= totalDuration) {
+      this.typewriterMode = false;
+      this.setBaseShapeWithColors(points);
+      this.hold();
+      this.resumeTextFlow();
+    }
+  }
+
+  _computeTypewriterTiming(points, duration) {
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+
+    for (const p of points) {
+      minX = Math.min(minX, p.x);
+      maxX = Math.max(maxX, p.x);
+      minY = Math.min(minY, p.y);
+      maxY = Math.max(maxY, p.y);
+    }
+
+    const xRange = maxX - minX || 1;
+    const yRange = maxY - minY || 1;
+    const perStroke = Math.min(0.16, duration * 0.09);
+    const staggerSpan = Math.max(0.5, duration - perStroke);
+    const delays = new Float32Array(this.count);
+
+    let maxDelay = 0;
+    for (let i = 0; i < this.count; i++) {
+      const src = points[i % points.length];
+      const nx = (src.x - minX) / xRange;
+      const ny = (src.y - minY) / yRange;
+      delays[i] = (nx * 0.86 + ny * 0.14) * staggerSpan;
+      maxDelay = Math.max(maxDelay, delays[i]);
+    }
+
+    return { delays, perStroke, totalDuration: maxDelay + perStroke };
   }
 
   startExplode({ autoMorph = true, onComplete = null } = {}) {
@@ -182,6 +306,7 @@ export default class ParticleSystem {
   }
 
   startMorph(onComplete, duration) {
+    this.typewriterMode = false;
     this.mode = MODES.MORPH;
     this.morphStartTime = this.time;
     this.onMorphComplete = onComplete;
@@ -207,6 +332,8 @@ export default class ParticleSystem {
   }
 
   resumeFlow() {
+    this.flowProfile = "default";
+    this.flowIntensity = 0.006;
     this.mode = MODES.FLOW;
   }
 
@@ -235,6 +362,11 @@ export default class ParticleSystem {
   }
 
   _updateFlow() {
+    if (this.flowProfile === "text") {
+      this._updateTextFlow();
+      return;
+    }
+
     const t = this.time;
     const intensity = this.flowIntensity;
     for (let i = 0; i < this.count; i++) {
@@ -248,6 +380,38 @@ export default class ParticleSystem {
       this.positions[i3 + 1] = by + Math.sin(t * 0.9 + phase * 0.7) * intensity;
       this.positions[i3 + 2] = bz + Math.cos(t * 1.5 + phase) * intensity * 0.3;
     }
+  }
+
+  _updateTextFlow() {
+    const t = this.time;
+    const { intensity, wave, colorPulse } = this.textFlow;
+
+    for (let i = 0; i < this.count; i++) {
+      const i3 = i * 3;
+      const phase = this.phases[i];
+      const bx = this.basePositions[i3];
+      const by = this.basePositions[i3 + 1];
+      const bz = this.basePositions[i3 + 2];
+
+      const ripple = Math.sin(t * 1.9 + bx * 2.8 + by * 0.6 + phase * 0.2) * wave;
+      const driftX = Math.sin(t * 1.35 + phase) * intensity;
+      const driftY = Math.cos(t * 1.05 + phase * 0.65) * intensity * 0.85;
+
+      this.positions[i3] = bx + driftX + ripple;
+      this.positions[i3 + 1] = by + driftY + ripple * 0.35;
+      this.positions[i3 + 2] =
+        bz + Math.sin(t * 1.6 + phase * 1.1) * intensity * 0.45;
+
+      const flicker = 0.72 + 0.28 * Math.sin(t * 3.4 + phase * 1.4);
+      const sweep = 0.82 + 0.18 * Math.sin(t * 1.7 + bx * 3.6 - t * 0.35);
+      const gain = 1 + colorPulse * (flicker * sweep - 1);
+
+      this.colors[i3] = Math.min(1, this.baseColors[i3] * gain);
+      this.colors[i3 + 1] = Math.min(1, this.baseColors[i3 + 1] * gain);
+      this.colors[i3 + 2] = Math.min(1, this.baseColors[i3 + 2] * gain);
+    }
+
+    this._commitColors();
   }
 
   _updateDrift() {
@@ -292,6 +456,7 @@ export default class ParticleSystem {
   _updateMorph() {
     const elapsed = this.time - this.morphStartTime;
     let allDone = true;
+    let colorsDirty = false;
 
     for (let i = 0; i < this.count; i++) {
       const i3 = i * 3;
@@ -300,6 +465,13 @@ export default class ParticleSystem {
 
       if (localT < 0) {
         allDone = false;
+        if (this.typewriterMode) {
+          this.positions[i3] = this.morphFrom[i3];
+          this.positions[i3 + 1] = this.morphFrom[i3 + 1];
+          this.positions[i3 + 2] = this.morphFrom[i3 + 2];
+          this._setColor(i, 0, 0, 0);
+          colorsDirty = true;
+        }
         continue;
       }
 
@@ -314,11 +486,22 @@ export default class ParticleSystem {
       this.positions[i3 + 2] =
         this.morphFrom[i3 + 2] +
         (this.targetPositions[i3 + 2] - this.morphFrom[i3 + 2]) * t;
+
+      if (this.typewriterMode) {
+        const colorT = easeInOutCubic(Math.min(1, localT * 3.5));
+        this.colors[i3] = this.targetColors[i3] * colorT;
+        this.colors[i3 + 1] = this.targetColors[i3 + 1] * colorT;
+        this.colors[i3 + 2] = this.targetColors[i3 + 2] * colorT;
+        colorsDirty = true;
+      }
     }
+
+    if (colorsDirty) this._commitColors();
 
     if (allDone && this.onMorphComplete) {
       const cb = this.onMorphComplete;
       this.onMorphComplete = null;
+      this.typewriterMode = false;
       this.hold();
       cb();
     }
@@ -356,12 +539,13 @@ export default class ParticleSystem {
   }
 
   _setColorFromSrc(i, color) {
-    const boost = this.sharp ? 1.15 : 1.5;
+    const boost = this.colorBoost ?? (this.sharp ? 1.15 : 1.5);
+    const lift = this.colorLift;
     this._setColor(
       i,
-      Math.min(1, color[0] * boost),
-      Math.min(1, color[1] * boost),
-      Math.min(1, color[2] * boost)
+      Math.min(1, color[0] * boost + lift),
+      Math.min(1, color[1] * boost + lift),
+      Math.min(1, color[2] * boost + lift)
     );
   }
 
