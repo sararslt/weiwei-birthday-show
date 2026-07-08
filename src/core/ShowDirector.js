@@ -11,25 +11,41 @@ import ParticleSystem from "./ParticleSystem.js";
 import Fireworks from "../scenes/Fireworks.js";
 import { easeInOutCubic, lerp } from "../utils/easing.js";
 import { boostPointColors } from "../utils/boostPointColors.js";
+import { getVisibilityProfile } from "../utils/visibilityProfile.js";
 
 export default class ShowDirector {
-  constructor({ scene, camera, timeline, cosmicScene }) {
+  constructor({
+    scene,
+    camera,
+    timeline,
+    cosmicScene,
+    quality,
+    onReady,
+    onError,
+  }) {
     this.scene = scene;
     this.camera = camera;
     this.timeline = timeline;
     this.cosmicScene = cosmicScene;
+    this.quality = quality;
+    this.onReady = onReady;
+    this.onError = onError;
+    this.particleCount = quality?.particleCount ?? config.particleCount;
 
     this.ready = false;
     this.handledPhases = new Set();
     this.inFinale = false;
-    this.finaleCameraZ = config.phase1.camera.endZ;
+    this.visibility = getVisibilityProfile();
+    this.finaleCameraZ = this._scaledCameraZ(config.finaleLayout.cameraZ);
 
-    const { particleCount, particleSize } = config;
+    const { particleSize } = config;
 
-    this.mainParticles = new ParticleSystem(particleCount, { size: particleSize });
+    this.mainParticles = new ParticleSystem(this.particleCount, {
+      size: particleSize,
+    });
     this.mainParticles.setOpacity(0);
 
-    this.fireworks = new Fireworks(6000);
+    this.fireworks = new Fireworks(quality?.fireworkCount ?? 6000);
 
     this.scene.add(this.fireworks.group);
     this.scene.add(this.mainParticles.group);
@@ -48,9 +64,10 @@ export default class ShowDirector {
 
   async _loadAssets() {
     try {
-      const { assets, particleCount, quality, textView, catView, groupView } =
-        config;
-      const sampleMax = quality.sampleMaxSize;
+      const { assets, textView, catView, groupView } = config;
+      const sampleMax =
+        this.quality?.sampleMaxSize ?? config.quality.sampleMaxSize;
+      const particleCount = this.particleCount;
 
       const [seal, weiwei, catProcessed, textProcessed, group] =
         await Promise.all([
@@ -106,9 +123,14 @@ export default class ShowDirector {
       }
 
       this._syncToElapsed(elapsed);
-      console.info("[ShowDirector] assets loaded");
+      this.onReady?.();
+      console.info("[ShowDirector] assets loaded", {
+        particles: particleCount,
+        tier: this.quality?.tier,
+      });
     } catch (error) {
       console.error("[ShowDirector] failed to load assets", error);
+      this.onError?.(error);
     }
   }
 
@@ -128,17 +150,64 @@ export default class ShowDirector {
     this.mainParticles.setOpacity(1);
   }
 
+  updateVisibilityProfile() {
+    this.visibility = getVisibilityProfile();
+    this.camera.fov = this.visibility.fov;
+    this.camera.updateProjectionMatrix();
+    this.finaleCameraZ = this._scaledCameraZ(config.finaleLayout.cameraZ);
+    if (!this.ready) return;
+
+    const phase = getPhaseAtTime(config, this.timeline.elapsed);
+    this._reapplyPhaseVisuals(phase);
+  }
+
+  _scaledSize(size) {
+    return size * this.visibility.particleMul;
+  }
+
+  _scaledCameraZ(z) {
+    return z * this.visibility.cameraMul;
+  }
+
+  _boostColors(boost, lift) {
+    const v = this.visibility;
+    return [boost + v.colorBoostAdd, lift + v.colorLiftAdd];
+  }
+
+  _reapplyPhaseVisuals(phase) {
+    switch (phase) {
+      case "text":
+        this._setTextParticleMode();
+        break;
+      case "finale":
+        this._setGroupParticleMode();
+        break;
+      case "cat":
+        this._setSoftParticleMode(config.catParticleSize);
+        break;
+      case "seal":
+      case "weiwei":
+        this._setDetailMode(false);
+        break;
+      default:
+        break;
+    }
+  }
+
   _setTextParticleMode() {
     const tv = config.textVisual;
+    const [boost, lift] = this._boostColors(tv.colorBoost, tv.colorLift);
     this.mainParticles.resetEnhancements();
     this.mainParticles.setSharpRender(false);
-    this.mainParticles.setColorBoost(tv.colorBoost, tv.colorLift);
-    if (tv.additive) this.mainParticles.setAdditiveBlend(true);
-    this.mainParticles.setSize(tv.particleSize ?? config.textParticleSize);
+    this.mainParticles.setColorBoost(boost, lift);
+    if (tv.additive || this.visibility.additive) {
+      this.mainParticles.setAdditiveBlend(true);
+    }
+    this.mainParticles.setSize(this._scaledSize(tv.particleSize ?? config.textParticleSize));
     this.mainParticles.setTextFlowOptions({
       intensity: tv.flowIntensity,
       wave: tv.wave,
-      colorPulse: tv.colorPulse,
+      colorPulse: tv.colorPulse * this.visibility.textColorPulseMul,
     });
     this.mainParticles.setOpacity(1);
   }
@@ -227,7 +296,7 @@ export default class ShowDirector {
     if (elapsed >= phases.finale.start) {
       this.inFinale = true;
       this._ensureFireworks(1);
-      this.finaleCameraZ = config.finaleLayout.cameraZ;
+      this.finaleCameraZ = this._scaledCameraZ(config.finaleLayout.cameraZ);
       this._hideAllSharpLayers();
       this._setGroupParticleMode();
       this.mainParticles.group.visible = true;
@@ -244,7 +313,7 @@ export default class ShowDirector {
 
     if (elapsed >= phases.cat.start) {
       this.inFinale = false;
-      this._setSoftParticleMode();
+      this._setSoftParticleMode(config.catParticleSize);
       this._applyParticleHold(
         this.catPoints,
         phases.cat.start + phases.cat.morph,
@@ -269,24 +338,38 @@ export default class ShowDirector {
     }
   }
 
-  _setSoftParticleMode() {
+  _setSoftParticleMode(size = config.particleSize) {
+    const v = this.visibility;
     this.mainParticles.resetEnhancements();
-    this._setDetailMode(false, config.particleSize);
+    this.mainParticles.setSharpRender(false);
+    if (v.additive) {
+      this.mainParticles.setAdditiveBlend(true);
+      this.mainParticles.setColorBoost(v.softColorBoost, v.colorLiftAdd);
+    }
+    this.mainParticles.setSize(this._scaledSize(size));
   }
 
   _setGroupParticleMode() {
     const g = config.groupVisual;
+    const [boost, lift] = this._boostColors(g.colorBoost, g.colorLift);
     this.mainParticles.resetEnhancements();
     this.mainParticles.setSharpRender(false);
-    this.mainParticles.setColorBoost(g.colorBoost, g.colorLift);
+    this.mainParticles.setColorBoost(boost, lift);
     this.mainParticles.setAdditiveBlend(true);
-    this.mainParticles.setSize(g.particleSize);
+    this.mainParticles.setSize(this._scaledSize(g.particleSize));
     this.mainParticles.setOpacity(1);
   }
 
   _setDetailMode(enabled, size = config.particleSize) {
     this.mainParticles.setSharpRender(enabled);
-    this.mainParticles.setSize(size);
+    this.mainParticles.setSize(this._scaledSize(size));
+    if (!enabled) {
+      const v = this.visibility;
+      if (v.additive) {
+        this.mainParticles.setAdditiveBlend(true);
+        this.mainParticles.setColorBoost(v.softColorBoost, v.colorLiftAdd);
+      }
+    }
   }
 
   _onPhaseChange(phase) {
@@ -318,7 +401,7 @@ export default class ShowDirector {
         break;
       case "cat":
         this._hideAllSharpLayers();
-        this._setSoftParticleMode();
+        this._setSoftParticleMode(config.catParticleSize);
         this.mainParticles.setOpacity(1);
         this.mainParticles.morphTo(this.catPoints, phases.cat.morph, () => {
           this.mainParticles.hold();
@@ -328,7 +411,7 @@ export default class ShowDirector {
       case "finale":
         this._hideAllSharpLayers();
         this.inFinale = true;
-        this.finaleCameraZ = config.finaleLayout.cameraZ;
+        this.finaleCameraZ = this._scaledCameraZ(config.finaleLayout.cameraZ);
         this._setGroupParticleMode();
         this.mainParticles.setOpacity(1);
         this.mainParticles.morphTo(this.groupPoints, phases.finale.morph, () => {
@@ -410,14 +493,15 @@ export default class ShowDirector {
   _updateCamera(elapsed) {
     const { camera: cam } = config.phase1;
     const introT = easeInOutCubic(Math.min(elapsed / 2, 1));
-    let targetZ = lerp(cam.startZ, cam.endZ, introT);
+    const endZ = this._scaledCameraZ(cam.endZ);
+    let targetZ = lerp(this._scaledCameraZ(cam.startZ), endZ, introT);
 
     if (this.inFinale) {
       const finaleStart = config.timeline.phases.finale.start;
       const pullBack = easeInOutCubic(
         Math.min(Math.max((elapsed - finaleStart) / 0.8, 0), 1)
       );
-      targetZ = lerp(cam.endZ, this.finaleCameraZ, pullBack);
+      targetZ = lerp(endZ, this.finaleCameraZ, pullBack);
     }
 
     this.camera.position.z = targetZ;

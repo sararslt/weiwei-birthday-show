@@ -33,7 +33,7 @@ export default {
   phase1: {
     camera: {
       startZ: 8.5,
-      endZ: 3.5,
+      endZ: 3.15,
       lookAt: [0, 0, 0],
     },
     stars: {
@@ -57,16 +57,16 @@ export default {
   },
 
   particleCount: 200000,
-  particleSize: 0.0024,
+  particleSize: 0.0031,
   /** cat/text 汇聚：与 weiwei 同款柔和光晕粒子（旧版见 git tag effects-backup） */
-  textParticleSize: 0.0026,
-  catParticleSize: 0.0036,
-  groupParticleSize: 0.0045,
+  textParticleSize: 0.0034,
+  catParticleSize: 0.0042,
+  groupParticleSize: 0.0052,
   /** 合影：更亮、对比更强，暗屏也能看清 */
   groupVisual: {
-    particleSize: 0.0045,
-    colorBoost: 2.05,
-    colorLift: 0.16,
+    particleSize: 0.0052,
+    colorBoost: 2.25,
+    colorLift: 0.18,
     sampleGain: 1.35,
     sampleLift: 0.12,
     starFade: 0.05,
@@ -81,9 +81,9 @@ export default {
   },
   /** 文字：透明背景 + 柔和粒子，打字完成后持续动态光效 */
   textVisual: {
-    particleSize: 0.0028,
-    colorBoost: 1.45,
-    colorLift: 0.06,
+    particleSize: 0.0035,
+    colorBoost: 1.65,
+    colorLift: 0.08,
     additive: true,
     flowIntensity: 0.014,
     wave: 0.0055,
@@ -112,7 +112,7 @@ export default {
   /** 大结局合影铺满屏幕 */
   groupView: { width: 6.2, height: 3.5, padding: 0.96 },
   finaleLayout: {
-    cameraZ: 3.65,
+    cameraZ: 3.35,
   },
 };
 

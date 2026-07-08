@@ -45,12 +45,12 @@ function createStarField(count, radius) {
 }
 
 export default class CosmicScene {
-  constructor() {
+  constructor({ starCount } = {}) {
     this.group = new THREE.Group();
     this.elapsed = 0;
 
     const { stars } = config.phase1;
-    this.stars = createStarField(stars.count, stars.radius);
+    this.stars = createStarField(starCount ?? stars.count, stars.radius);
     this.group.add(this.stars);
   }
 
