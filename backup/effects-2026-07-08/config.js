@@ -56,7 +56,6 @@ export default {
 
   particleCount: 200000,
   particleSize: 0.0024,
-  /** cat/text 汇聚：与 weiwei 同款柔和光晕粒子（旧版见 git tag effects-backup） */
   textParticleSize: 0.0026,
   catParticleSize: 0.0036,
   groupParticleSize: 0.0036,

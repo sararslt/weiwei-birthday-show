@@ -88,7 +88,7 @@ export default class ShowDirector {
         textProcessed.width,
         textProcessed.height,
         particleCount,
-        "fill",
+        "fill-sharp",
         { fitView: textView }
       );
 
@@ -97,7 +97,7 @@ export default class ShowDirector {
         catProcessed.width,
         catProcessed.height,
         particleCount,
-        "fill",
+        "fill-sharp",
         { fitView: catView }
       );
 
@@ -176,13 +176,10 @@ export default class ShowDirector {
 
     if (elapsed >= phases.text.start) {
       this.inFinale = true;
-      const morphEnd = phases.text.start + phases.text.morph;
-      if (elapsed < morphEnd) {
-        this._setSoftParticleMode();
-      }
+      this._setDetailMode(true, config.textParticleSize);
       this._applyTextHold(
         this.textPoints,
-        morphEnd,
+        phases.text.start + phases.text.morph,
         elapsed
       );
       return;
@@ -207,7 +204,7 @@ export default class ShowDirector {
 
     if (elapsed >= phases.cat.start) {
       this.inFinale = false;
-      this._setSoftParticleMode();
+      this._setDetailMode(true, config.catParticleSize);
       this._applyParticleHold(
         this.catPoints,
         phases.cat.start + phases.cat.morph,
@@ -230,10 +227,6 @@ export default class ShowDirector {
       this.mainParticles.hold();
       this.mainParticles.resumeFlow();
     }
-  }
-
-  _setSoftParticleMode() {
-    this._setDetailMode(false, config.particleSize);
   }
 
   _setDetailMode(enabled, size = config.particleSize) {
@@ -270,7 +263,7 @@ export default class ShowDirector {
         break;
       case "cat":
         this._hideAllSharpLayers();
-        this._setSoftParticleMode();
+        this._setDetailMode(true, config.catParticleSize);
         this.mainParticles.setOpacity(1);
         this.mainParticles.morphTo(this.catPoints, phases.cat.morph, () => {
           this.mainParticles.hold();
@@ -291,7 +284,7 @@ export default class ShowDirector {
         break;
       case "text":
         this._hideTextSharp();
-        this._setSoftParticleMode();
+        this._setDetailMode(true, config.textParticleSize);
         this.mainParticles.morphTo(this.textPoints, phases.text.morph, () => {
           this.mainParticles.hold();
           this._showTextSharp();
