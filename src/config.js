@@ -1,3 +1,5 @@
+const base = import.meta.env.BASE_URL;
+
 export default {
   name: "炜炜",
 
@@ -46,12 +48,12 @@ export default {
   },
 
   assets: {
-    seal: "/seal.png",
-    weiwei: "/weiwei.png",
-    cat: "/cat.png",
-    text: "/text.png",
-    group: "/group.png",
-    birthday: "/birthday.mp3",
+    seal: `${base}seal.png`,
+    weiwei: `${base}weiwei.png`,
+    cat: `${base}cat.png`,
+    text: `${base}text.png`,
+    group: `${base}group.png`,
+    birthday: `${base}birthday.mp3`,
   },
 
   particleCount: 200000,
