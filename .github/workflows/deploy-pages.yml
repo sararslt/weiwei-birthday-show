@@ -25,6 +25,13 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      # 把手势互动站一并发布到 Pages 子路径，不影响主站
+      - name: Include gesture-interactive demo
+        run: |
+          if [ -d gesture-interactive ]; then
+            mkdir -p dist/gesture-interactive
+            cp -R gesture-interactive/. dist/gesture-interactive/
+          fi
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist
