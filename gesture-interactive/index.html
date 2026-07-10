@@ -1,0 +1,1067 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Three.js AI 粒子交互系统</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: #050508;
+            font-family: "SF Pro Display", "PingFang SC", "Helvetica Neue", sans-serif;
+            color: #e8e8ef;
+        }
+        #canvas-container {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+        }
+        canvas { display: block; width: 100%; height: 100%; }
+
+        /* 摄像头预览（左下角，半透明） */
+        #video-preview {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            width: 180px;
+            height: 135px;
+            object-fit: cover;
+            border-radius: 10px;
+            border: 1px solid rgba(255, 255, 255, 0.25);
+            transform: scaleX(-1); /* 镜像 */
+            z-index: 2;
+            opacity: 0.7;
+            background: #111;
+            box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+        }
+
+        #hud {
+            position: absolute;
+            top: 18px;
+            left: 20px;
+            z-index: 3;
+            pointer-events: none;
+        }
+        #hud h1 {
+            margin: 0 0 6px;
+            font-size: 15px;
+            font-weight: 600;
+            letter-spacing: 0.04em;
+            opacity: 0.9;
+        }
+        #hud p {
+            margin: 0;
+            font-size: 12px;
+            opacity: 0.55;
+            line-height: 1.55;
+        }
+        #status {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            z-index: 3;
+            font-size: 12px;
+            opacity: 0.75;
+            background: rgba(0, 0, 0, 0.35);
+            padding: 8px 12px;
+            border-radius: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            max-width: min(420px, calc(100vw - 40px));
+        }
+        #start-btn, #manual-btns button {
+            z-index: 10;
+            padding: 10px 16px;
+            border: 1px solid rgba(255, 255, 255, 0.28);
+            border-radius: 999px;
+            background: rgba(20, 22, 32, 0.85);
+            color: #fff;
+            font-size: 13px;
+            cursor: pointer;
+            backdrop-filter: blur(8px);
+        }
+        #start-btn {
+            position: absolute;
+            inset: 0;
+            margin: auto;
+            width: max-content;
+            height: max-content;
+        }
+        #manual-btns {
+            position: absolute;
+            top: 18px;
+            right: 20px;
+            display: none;
+            gap: 8px;
+            flex-wrap: wrap;
+            justify-content: flex-end;
+            max-width: min(420px, calc(100vw - 40px));
+        }
+        #manual-btns.visible { display: flex; }
+        #start-btn:hover, #manual-btns button:hover { background: rgba(40, 44, 60, 0.95); }
+        #start-btn.hidden { display: none; }
+        #manual-btns button.active {
+            border-color: rgba(127, 210, 255, 0.7);
+            background: rgba(50, 70, 100, 0.9);
+        }
+    </style>
+</head>
+<body>
+    <div id="canvas-container"></div>
+    <video id="video-preview" autoplay playsinline muted></video>
+    <audio id="bgm" src="./birthday.mp3" loop preload="auto"></audio>
+    <div id="hud">
+        <h1>Three.js AI 粒子交互系统</h1>
+        <p>
+            OK → 海豹（开始播放生日快乐歌）· 比 1 → 炜炜 · 比 2 → 猫 · 比 3 → 生日快乐文字<br>
+            每种手势出现一次即变形（也可点右上角按钮）
+        </p>
+    </div>
+    <div id="status">正在加载形状…</div>
+    <button id="start-btn" type="button">开启摄像头并开始</button>
+    <div id="manual-btns">
+        <button type="button" data-shape="seal">OK 海豹</button>
+        <button type="button" data-shape="weiwei">1 炜炜</button>
+        <button type="button" data-shape="cat">2 猫</button>
+        <button type="button" data-shape="text">3 生日快乐</button>
+    </div>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+    <script type="module">
+        import * as THREE from 'three';
+        import {
+            loadShapePoints,
+            loadShapePointsFromCanvas,
+        } from './loadShapePoints.js';
+        import { fitPointsToView } from './sampleCanvas.js';
+        import {
+            FilesetResolver,
+            HandLandmarker,
+        } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/+esm';
+
+        const PARTICLE_COUNT = 28000;
+        // 自绘汉字笔画 + 更大华丽蛋糕
+        const TEXT_VIEW = {
+            width: 8.0,
+            height: 5.0,
+            padding: 0.94,
+            offsetX: 0,
+            offsetY: 0.05,
+        };
+        const TEXT_VISUAL = {
+            colorBoost: 1.45,
+            colorLift: 0.1,
+            particleSize: 0.018,
+            wave: 0.0025,
+            colorPulse: 0.14,
+        };
+        // 笔画粒子：够读清，又不过密
+        const TEXT_SAMPLE_COUNT = 14000;
+        const SHAPE_LABELS = {
+            seal: '海豹',
+            weiwei: '炜炜',
+            cat: '猫',
+            text: '生日快乐',
+        };
+
+        const container = document.getElementById('canvas-container');
+        const video = document.getElementById('video-preview');
+        const statusEl = document.getElementById('status');
+        const startBtn = document.getElementById('start-btn');
+        const manualBtns = document.getElementById('manual-btns');
+        const bgm = document.getElementById('bgm');
+        bgm.volume = 0.55;
+        let bgmStarted = false;
+
+        function startBirthdayMusic() {
+            if (bgmStarted) return;
+            bgmStarted = true;
+            bgm.loop = true;
+            bgm.currentTime = 0;
+            const playPromise = bgm.play();
+            if (playPromise && typeof playPromise.catch === 'function') {
+                playPromise.catch((err) => {
+                    console.warn('背景音乐播放失败，将在下次交互时重试', err);
+                    bgmStarted = false;
+                });
+            }
+        }
+
+        const scene = new THREE.Scene();
+        scene.fog = new THREE.FogExp2(0x050508, 0.02);
+
+        const camera = new THREE.PerspectiveCamera(
+            50,
+            window.innerWidth / window.innerHeight,
+            0.1,
+            100
+        );
+        camera.position.set(0, 0, 8.5);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setClearColor(0x050508, 1);
+        container.appendChild(renderer.domElement);
+
+        const positions = new Float32Array(PARTICLE_COUNT * 3);
+        const colors = new Float32Array(PARTICLE_COUNT * 3);
+        const fromPositions = new Float32Array(PARTICLE_COUNT * 3);
+        const fromColors = new Float32Array(PARTICLE_COUNT * 3);
+        const toPositions = new Float32Array(PARTICLE_COUNT * 3);
+        const toColors = new Float32Array(PARTICLE_COUNT * 3);
+        const scatterPositions = new Float32Array(PARTICLE_COUNT * 3);
+        const scatterColors = new Float32Array(PARTICLE_COUNT * 3);
+        const velocities = new Float32Array(PARTICLE_COUNT * 3);
+        const shapeBuffers = {};
+
+        const colorA = new THREE.Color(0x4fd1ff);
+        const colorB = new THREE.Color(0xff6bcb);
+        const colorC = new THREE.Color(0xa78bfa);
+        const tmpColor = new THREE.Color();
+
+        for (let i = 0; i < PARTICLE_COUNT; i++) {
+            const i3 = i * 3;
+            const x = (Math.random() - 0.5) * 14;
+            const y = (Math.random() - 0.5) * 8;
+            const z = (Math.random() - 0.5) * 4;
+            positions[i3] = x;
+            positions[i3 + 1] = y;
+            positions[i3 + 2] = z;
+            scatterPositions[i3] = x;
+            scatterPositions[i3 + 1] = y;
+            scatterPositions[i3 + 2] = z;
+            fromPositions[i3] = x;
+            fromPositions[i3 + 1] = y;
+            fromPositions[i3 + 2] = z;
+            toPositions[i3] = x;
+            toPositions[i3 + 1] = y;
+            toPositions[i3 + 2] = z;
+
+            const t = Math.random();
+            tmpColor.copy(colorA).lerp(colorB, t).lerp(colorC, Math.random() * 0.35);
+            colors[i3] = tmpColor.r;
+            colors[i3 + 1] = tmpColor.g;
+            colors[i3 + 2] = tmpColor.b;
+            scatterColors[i3] = tmpColor.r;
+            scatterColors[i3 + 1] = tmpColor.g;
+            scatterColors[i3 + 2] = tmpColor.b;
+            fromColors[i3] = tmpColor.r;
+            fromColors[i3 + 1] = tmpColor.g;
+            fromColors[i3 + 2] = tmpColor.b;
+            toColors[i3] = tmpColor.r;
+            toColors[i3 + 1] = tmpColor.g;
+            toColors[i3 + 2] = tmpColor.b;
+        }
+
+        function createSoftTexture() {
+            const c = document.createElement('canvas');
+            c.width = 64;
+            c.height = 64;
+            const ctx = c.getContext('2d');
+            const g = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+            g.addColorStop(0, 'rgba(255,255,255,1)');
+            g.addColorStop(0.35, 'rgba(255,255,255,0.95)');
+            g.addColorStop(0.7, 'rgba(255,255,255,0.2)');
+            g.addColorStop(1, 'rgba(255,255,255,0)');
+            ctx.fillStyle = g;
+            ctx.fillRect(0, 0, 64, 64);
+            const tex = new THREE.CanvasTexture(c);
+            tex.minFilter = THREE.LinearFilter;
+            tex.magFilter = THREE.LinearFilter;
+            return tex;
+        }
+
+        const softMap = createSoftTexture();
+
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+        const material = new THREE.PointsMaterial({
+            size: 0.028,
+            map: softMap,
+            vertexColors: true,
+            transparent: true,
+            opacity: 0.95,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending,
+            sizeAttenuation: true,
+        });
+
+        const points = new THREE.Points(geometry, material);
+        scene.add(points);
+
+        function applyShapeRenderStyle(shapeKey) {
+            // 文字轮廓：柔光叠加，但粒子更少更疏，边缘更清楚
+            const isText = shapeKey === 'text';
+            material.map = softMap;
+            material.blending = THREE.AdditiveBlending;
+            material.opacity = 1;
+            material.needsUpdate = true;
+            scene.fog.density = isText ? 0.01 : 0.02;
+        }
+
+        let shapesReady = false;
+        let morphAmount = 1;
+        let currentShape = null; // null = scatter
+        let handLandmarker = null;
+        let lastHandTs = -1;
+        let cameraReady = false;
+        let prevGesture = null;
+        let activeGesture = null;
+
+        function pointsToBuffers(samplePoints, { textOutline = false } = {}) {
+            const pos = new Float32Array(PARTICLE_COUNT * 3);
+            const col = new Float32Array(PARTICLE_COUNT * 3);
+            const len = samplePoints.length;
+            const boost = TEXT_VISUAL.colorBoost;
+            const lift = TEXT_VISUAL.colorLift;
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const i3 = i * 3;
+                if (textOutline) {
+                    if (i < len) {
+                        const p = samplePoints[i];
+                        // 轮廓：几乎无抖动，笔画干净
+                        pos[i3] = p.x;
+                        pos[i3 + 1] = p.y;
+                        pos[i3 + 2] = p.z ?? 0;
+                        let r = (p.color?.[0] ?? 0.95) * boost + lift;
+                        let g = (p.color?.[1] ?? 0.85) * boost + lift * 0.8;
+                        let b = (p.color?.[2] ?? 0.55) * boost * 0.8 + lift * 0.35;
+                        col[i3] = Math.min(1, r + 0.06);
+                        col[i3 + 1] = Math.min(1, g + 0.03);
+                        col[i3 + 2] = Math.min(1, b * 0.9);
+                    } else {
+                        // 多余粒子藏屏外，降低密度
+                        pos[i3] = 0;
+                        pos[i3 + 1] = 0;
+                        pos[i3 + 2] = -80;
+                        col[i3] = 0;
+                        col[i3 + 1] = 0;
+                        col[i3 + 2] = 0;
+                    }
+                } else {
+                    const p = samplePoints[i % len];
+                    pos[i3] = p.x + (Math.random() - 0.5) * 0.03;
+                    pos[i3 + 1] = p.y + (Math.random() - 0.5) * 0.03;
+                    pos[i3 + 2] = (p.z ?? 0) + (Math.random() - 0.5) * 0.03;
+                    col[i3] = p.color?.[0] ?? 0.85;
+                    col[i3 + 1] = p.color?.[1] ?? 0.9;
+                    col[i3 + 2] = p.color?.[2] ?? 1.0;
+                }
+            }
+            return { pos, col };
+        }
+
+        function strokeWave(ctx, x0, x1, y, amp, step = 16) {
+            ctx.beginPath();
+            for (let x = x0; x <= x1; x += step) {
+                const yy = y + Math.sin((x - x0) * 0.18) * amp;
+                if (x === x0) ctx.moveTo(x, yy);
+                else ctx.lineTo(x, yy);
+            }
+            ctx.stroke();
+        }
+
+        function drawStar(ctx, x, y, r) {
+            ctx.beginPath();
+            for (let i = 0; i < 5; i++) {
+                const a = -Math.PI / 2 + (i * Math.PI * 2) / 5;
+                const b = a + Math.PI / 5;
+                const x1 = x + Math.cos(a) * r;
+                const y1 = y + Math.sin(a) * r;
+                const x2 = x + Math.cos(b) * r * 0.42;
+                const y2 = y + Math.sin(b) * r * 0.42;
+                if (i === 0) ctx.moveTo(x1, y1);
+                else ctx.lineTo(x1, y1);
+                ctx.lineTo(x2, y2);
+            }
+            ctx.closePath();
+            ctx.stroke();
+        }
+
+        // 手绘华丽蛋糕轮廓（无填充）
+        function drawCakeOutline(ctx, cx, cy, scale = 1) {
+            const s = scale;
+            ctx.save();
+            ctx.translate(cx, cy);
+            ctx.scale(s, s);
+            ctx.strokeStyle = '#ffe7a8';
+            ctx.lineWidth = 11;
+            ctx.lineJoin = 'round';
+            ctx.lineCap = 'round';
+
+            // 托盘
+            ctx.beginPath();
+            ctx.moveTo(-210, 130);
+            ctx.quadraticCurveTo(0, 155, 210, 130);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(-190, 130);
+            ctx.lineTo(-190, 145);
+            ctx.quadraticCurveTo(0, 170, 190, 145);
+            ctx.lineTo(190, 130);
+            ctx.stroke();
+
+            // 底层（更宽）
+            ctx.beginPath();
+            ctx.moveTo(-180, 35);
+            ctx.lineTo(-180, 110);
+            ctx.quadraticCurveTo(-180, 135, -145, 135);
+            ctx.lineTo(145, 135);
+            ctx.quadraticCurveTo(180, 135, 180, 110);
+            ctx.lineTo(180, 35);
+            ctx.stroke();
+
+            // 中层
+            ctx.beginPath();
+            ctx.moveTo(-130, -25);
+            ctx.lineTo(-130, 35);
+            ctx.lineTo(130, 35);
+            ctx.lineTo(130, -25);
+            ctx.stroke();
+
+            // 顶层
+            ctx.beginPath();
+            ctx.moveTo(-85, -80);
+            ctx.lineTo(-85, -25);
+            ctx.lineTo(85, -25);
+            ctx.lineTo(85, -80);
+            ctx.stroke();
+
+            // 三层奶油波浪
+            strokeWave(ctx, -175, 175, 35, 10, 14);
+            strokeWave(ctx, -125, 125, -25, 8, 12);
+            strokeWave(ctx, -80, 80, -80, 7, 10);
+
+            // 装饰圆点 / 樱桃
+            const cherries = [
+                [-90, 10], [-40, 18], [10, 8], [55, 16], [100, 10],
+                [-60, -50], [0, -45], [55, -52],
+            ];
+            for (const [x, y] of cherries) {
+                ctx.beginPath();
+                ctx.arc(x, y, 7, 0, Math.PI * 2);
+                ctx.stroke();
+            }
+
+            // 五根蜡烛 + 火焰
+            const candles = [-55, -28, 0, 28, 55];
+            for (const x of candles) {
+                ctx.beginPath();
+                ctx.moveTo(x, -80);
+                ctx.lineTo(x, -145);
+                ctx.stroke();
+                // 螺旋纹
+                ctx.beginPath();
+                ctx.moveTo(x - 5, -100);
+                ctx.lineTo(x + 5, -112);
+                ctx.lineTo(x - 5, -124);
+                ctx.stroke();
+                // 火焰
+                ctx.beginPath();
+                ctx.moveTo(x, -165);
+                ctx.quadraticCurveTo(x + 10, -152, x, -138);
+                ctx.quadraticCurveTo(x - 10, -152, x, -165);
+                ctx.stroke();
+            }
+
+            // 两侧星星装饰
+            drawStar(ctx, -210, -20, 18);
+            drawStar(ctx, 210, -10, 16);
+            drawStar(ctx, -195, 60, 12);
+            drawStar(ctx, 200, 55, 13);
+
+            ctx.restore();
+        }
+
+        // 自制粒子汉字：粗描边空心字，保证可读
+        function makeBirthdayTextCanvas() {
+            const width = 2200;
+            const height = 1300;
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, width, height);
+
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.lineJoin = 'round';
+            ctx.lineCap = 'round';
+            ctx.font =
+                '900 300px "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif';
+
+            const chars = ['生', '日', '快', '乐', '炜', '炜'];
+            const ty = height * 0.24;
+            // 字间距加大：总跨度约 1900px
+            const totalSpan = 1900;
+            const step = totalSpan / (chars.length - 1);
+            const startX = width / 2 - totalSpan / 2;
+
+            for (let i = 0; i < chars.length; i++) {
+                const x = startX + step * i;
+                ctx.strokeStyle = '#ffd27a';
+                ctx.lineWidth = 24;
+                ctx.strokeText(chars[i], x, ty);
+                ctx.strokeStyle = '#fff6d6';
+                ctx.lineWidth = 11;
+                ctx.strokeText(chars[i], x, ty);
+            }
+
+            // 蛋糕稍小，给大字留空间
+            drawCakeOutline(ctx, width / 2, height * 0.74, 1.45);
+
+            return { canvas, ctx, width, height };
+        }
+
+        // —— 全屏动态烟花（仅文字阶段）——
+        const FW_COUNT = 9000;
+        const fwPositions = new Float32Array(FW_COUNT * 3);
+        const fwColors = new Float32Array(FW_COUNT * 3);
+        const fwVel = new Float32Array(FW_COUNT * 3);
+        const fwLife = new Float32Array(FW_COUNT);
+        const fwMaxLife = new Float32Array(FW_COUNT);
+        let fwCursor = 0;
+        const FW_PALETTE = [
+            [1.0, 0.35, 0.45],
+            [1.0, 0.75, 0.2],
+            [0.45, 0.85, 1.0],
+            [0.55, 1.0, 0.55],
+            [0.95, 0.5, 1.0],
+            [1.0, 1.0, 0.85],
+            [1.0, 0.55, 0.2],
+            [0.7, 0.85, 1.0],
+        ];
+
+        for (let i = 0; i < FW_COUNT; i++) {
+            fwPositions[i * 3 + 1] = -99;
+            fwLife[i] = 99;
+            fwMaxLife[i] = 1;
+        }
+
+        function createFwTexture() {
+            const c = document.createElement('canvas');
+            c.width = 32;
+            c.height = 32;
+            const ctx = c.getContext('2d');
+            const g = ctx.createRadialGradient(16, 16, 0, 16, 16, 16);
+            g.addColorStop(0, 'rgba(255,255,255,1)');
+            g.addColorStop(0.35, 'rgba(255,255,255,0.9)');
+            g.addColorStop(1, 'rgba(255,255,255,0)');
+            ctx.fillStyle = g;
+            ctx.fillRect(0, 0, 32, 32);
+            return new THREE.CanvasTexture(c);
+        }
+
+        const fwGeometry = new THREE.BufferGeometry();
+        fwGeometry.setAttribute('position', new THREE.BufferAttribute(fwPositions, 3));
+        fwGeometry.setAttribute('color', new THREE.BufferAttribute(fwColors, 3));
+        const fwMaterial = new THREE.PointsMaterial({
+            size: 0.11,
+            map: createFwTexture(),
+            vertexColors: true,
+            transparent: true,
+            opacity: 0.95,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+            sizeAttenuation: true,
+            fog: false,
+        });
+        const fireworks = new THREE.Points(fwGeometry, fwMaterial);
+        fireworks.position.z = -4.2;
+        fireworks.renderOrder = 0;
+        fireworks.visible = false;
+        scene.add(fireworks);
+        points.renderOrder = 2;
+
+        let fwActive = false;
+        let fwTime = 0;
+        let fwNextBurst = 0;
+
+        function nextFwIndex() {
+            const i = fwCursor;
+            fwCursor = (fwCursor + 1) % FW_COUNT;
+            return i;
+        }
+
+        // 一朵完整烟花：中心爆炸出一圈粒子，位置铺满全屏
+        function spawnOneFirework() {
+            const cx = (Math.random() - 0.5) * 18;
+            const cy = (Math.random() - 0.5) * 11;
+            const cz = -1.5 + Math.random() * 3;
+            const c = FW_PALETTE[Math.floor(Math.random() * FW_PALETTE.length)];
+            const sparks = 55 + Math.floor(Math.random() * 45);
+            const baseSpeed = 1.1 + Math.random() * 1.6;
+
+            for (let s = 0; s < sparks; s++) {
+                const i = nextFwIndex();
+                const i3 = i * 3;
+                const angle = Math.random() * Math.PI * 2;
+                const elev = (Math.random() - 0.5) * 0.9;
+                const speed = baseSpeed * (0.55 + Math.random() * 0.7);
+                fwPositions[i3] = cx;
+                fwPositions[i3 + 1] = cy;
+                fwPositions[i3 + 2] = cz;
+                fwVel[i3] = Math.cos(angle) * Math.cos(elev) * speed;
+                fwVel[i3 + 1] = Math.sin(angle) * Math.cos(elev) * speed;
+                fwVel[i3 + 2] = Math.sin(elev) * speed * 0.55;
+                fwLife[i] = 0;
+                fwMaxLife[i] = 1.0 + Math.random() * 1.4;
+                // 同色系轻微抖动
+                fwColors[i3] = Math.min(1, c[0] * (0.85 + Math.random() * 0.25));
+                fwColors[i3 + 1] = Math.min(1, c[1] * (0.85 + Math.random() * 0.25));
+                fwColors[i3 + 2] = Math.min(1, c[2] * (0.85 + Math.random() * 0.25));
+            }
+        }
+
+        function spawnFireworkBurst(n) {
+            for (let b = 0; b < n; b++) spawnOneFirework();
+        }
+
+        function setFireworksEnabled(on) {
+            fwActive = on;
+            fireworks.visible = on;
+            if (on) {
+                fwTime = 0;
+                fwNextBurst = 0;
+                // 开场铺满全屏
+                spawnFireworkBurst(10);
+            } else {
+                for (let i = 0; i < FW_COUNT; i++) {
+                    fwPositions[i * 3 + 1] = -99;
+                    fwLife[i] = 99;
+                }
+                fwGeometry.attributes.position.needsUpdate = true;
+            }
+        }
+
+        function updateFireworks(dt) {
+            if (!fwActive) return;
+            fwTime += dt;
+            // 更密、更频繁，整屏持续绽放
+            if (fwTime >= fwNextBurst) {
+                spawnFireworkBurst(2 + Math.floor(Math.random() * 3));
+                fwNextBurst = fwTime + 0.12 + Math.random() * 0.18;
+            }
+            for (let i = 0; i < FW_COUNT; i++) {
+                const i3 = i * 3;
+                fwLife[i] += dt;
+                if (fwLife[i] > fwMaxLife[i]) {
+                    fwPositions[i3 + 1] = -99;
+                    continue;
+                }
+                fwVel[i3 + 1] -= 0.02 * dt * 60;
+                fwVel[i3] *= 0.986;
+                fwVel[i3 + 1] *= 0.986;
+                fwVel[i3 + 2] *= 0.986;
+                fwPositions[i3] += fwVel[i3] * dt;
+                fwPositions[i3 + 1] += fwVel[i3 + 1] * dt;
+                fwPositions[i3 + 2] += fwVel[i3 + 2] * dt;
+                const fade = 1 - fwLife[i] / fwMaxLife[i];
+                fwColors[i3] *= 0.997;
+                fwColors[i3 + 1] *= 0.997;
+                fwColors[i3 + 2] *= 0.997;
+                if (fade < 0.35) {
+                    fwColors[i3] *= fade / 0.35;
+                    fwColors[i3 + 1] *= fade / 0.35;
+                    fwColors[i3 + 2] *= fade / 0.35;
+                }
+            }
+            fwGeometry.attributes.position.needsUpdate = true;
+            fwGeometry.attributes.color.needsUpdate = true;
+        }
+
+        function copyBuffer(src, dst) {
+            dst.set(src);
+        }
+
+        function setShape(shapeKey) {
+            if (!shapesReady || !shapeBuffers[shapeKey]) return;
+            if (currentShape === shapeKey && morphAmount > 0.98) return;
+
+            // 从当前插值位置出发，避免跳变
+            const m = morphAmount;
+            const inv = 1 - m;
+            for (let i = 0; i < PARTICLE_COUNT * 3; i++) {
+                fromPositions[i] = toPositions[i] * m + fromPositions[i] * inv;
+                fromColors[i] = toColors[i] * m + fromColors[i] * inv;
+            }
+            // 若还在散开态，用当前粒子位置更准
+            if (!currentShape) {
+                copyBuffer(geometry.attributes.position.array, fromPositions);
+                copyBuffer(geometry.attributes.color.array, fromColors);
+            }
+
+            copyBuffer(shapeBuffers[shapeKey].pos, toPositions);
+            copyBuffer(shapeBuffers[shapeKey].col, toColors);
+            currentShape = shapeKey;
+            morphAmount = 0;
+            // 文字推近，占更多画面；背景烟花仅文字阶段
+            camera.position.z = shapeKey === 'text' ? 6.8 : 8.5;
+            applyShapeRenderStyle(shapeKey);
+            setFireworksEnabled(shapeKey === 'text');
+
+            // OK / 海豹开始后循环播放生日快乐歌，直到关闭页面
+            if (shapeKey === 'seal') {
+                startBirthdayMusic();
+            }
+
+            for (const btn of manualBtns.querySelectorAll('button')) {
+                btn.classList.toggle('active', btn.dataset.shape === shapeKey);
+            }
+        }
+
+        // seal/weiwei/cat 复用素材；文字改为自绘汉字笔画粒子
+        try {
+            statusEl.textContent = '正在采样海豹 / 炜炜 / 猫 / 自绘生日快乐文字…';
+            const [sealPts, weiweiPts, catPts] = await Promise.all([
+                loadShapePoints('./seal.png', PARTICLE_COUNT, 'outline', {
+                    scale: 2.35,
+                    sampleMaxSize: 1600,
+                }),
+                loadShapePoints('./weiwei.png', PARTICLE_COUNT, 'fill', {
+                    scale: 2.2,
+                    sampleMaxSize: 1600,
+                }),
+                loadShapePoints('./cat.png', PARTICLE_COUNT, 'fill', {
+                    scale: 2.1,
+                    sampleMaxSize: 1600,
+                }),
+            ]);
+
+            // 自绘空心汉字 + 蛋糕轮廓，再按笔画像素采样（不是照片填充）
+            const textCanvas = makeBirthdayTextCanvas();
+            const textPtsRaw = loadShapePointsFromCanvas(
+                textCanvas.ctx,
+                textCanvas.width,
+                textCanvas.height,
+                TEXT_SAMPLE_COUNT,
+                'fill'
+            );
+            const textPts = fitPointsToView(
+                textPtsRaw,
+                TEXT_VIEW.width,
+                TEXT_VIEW.height,
+                TEXT_VIEW.padding
+            ).map((p) => ({
+                ...p,
+                x: p.x + TEXT_VIEW.offsetX,
+                y: p.y + TEXT_VIEW.offsetY,
+            }));
+
+            shapeBuffers.seal = pointsToBuffers(sealPts);
+            shapeBuffers.weiwei = pointsToBuffers(weiweiPts);
+            shapeBuffers.cat = pointsToBuffers(catPts);
+            shapeBuffers.text = pointsToBuffers(textPts, { textOutline: true });
+
+            shapesReady = true;
+            statusEl.textContent = '形状已就绪 · 点击开启摄像头';
+        } catch (err) {
+            console.error(err);
+            statusEl.textContent = '形状加载失败，请确认 seal/weiwei/cat.png 可访问';
+        }
+
+        function dist2d(a, b) {
+            return Math.hypot(a.x - b.x, a.y - b.y);
+        }
+
+        function fingerExtended(landmarks, tipIdx, pipIdx) {
+            const wrist = landmarks[0];
+            return dist2d(landmarks[tipIdx], wrist) > dist2d(landmarks[pipIdx], wrist) * 1.08;
+        }
+
+        function fingerCurled(landmarks, tipIdx, pipIdx) {
+            const wrist = landmarks[0];
+            return dist2d(landmarks[tipIdx], wrist) < dist2d(landmarks[pipIdx], wrist) * 1.12;
+        }
+
+        function isOkGesture(landmarks) {
+            if (!landmarks || landmarks.length < 21) return false;
+            const wrist = landmarks[0];
+            const handScale = Math.max(dist2d(wrist, landmarks[9]), 0.08);
+            const tipClose = dist2d(landmarks[4], landmarks[8]) < handScale * 0.35;
+            const indexCurled = fingerCurled(landmarks, 8, 6);
+            return (
+                tipClose &&
+                indexCurled &&
+                fingerExtended(landmarks, 12, 10) &&
+                fingerExtended(landmarks, 16, 14) &&
+                fingerExtended(landmarks, 20, 18)
+            );
+        }
+
+        // 比 1：仅食指伸直
+        function isOneGesture(landmarks) {
+            if (!landmarks || landmarks.length < 21) return false;
+            if (isOkGesture(landmarks)) return false;
+            return (
+                fingerExtended(landmarks, 8, 6) &&
+                fingerCurled(landmarks, 12, 10) &&
+                fingerCurled(landmarks, 16, 14) &&
+                fingerCurled(landmarks, 20, 18)
+            );
+        }
+
+        // 比 2：食指 + 中指
+        function isTwoGesture(landmarks) {
+            if (!landmarks || landmarks.length < 21) return false;
+            return (
+                fingerExtended(landmarks, 8, 6) &&
+                fingerExtended(landmarks, 12, 10) &&
+                fingerCurled(landmarks, 16, 14) &&
+                fingerCurled(landmarks, 20, 18)
+            );
+        }
+
+        // 比 3：食指 + 中指 + 无名指
+        function isThreeGesture(landmarks) {
+            if (!landmarks || landmarks.length < 21) return false;
+            return (
+                fingerExtended(landmarks, 8, 6) &&
+                fingerExtended(landmarks, 12, 10) &&
+                fingerExtended(landmarks, 16, 14) &&
+                fingerCurled(landmarks, 20, 18)
+            );
+        }
+
+        function classifyGesture(landmarks) {
+            if (!landmarks) return null;
+            // 先判更具体的 OK，再判 3→2→1，避免互相抢
+            if (isOkGesture(landmarks)) return 'ok';
+            if (isThreeGesture(landmarks)) return 'three';
+            if (isTwoGesture(landmarks)) return 'two';
+            if (isOneGesture(landmarks)) return 'one';
+            return null;
+        }
+
+        const GESTURE_TO_SHAPE = {
+            ok: 'seal',
+            one: 'weiwei',
+            two: 'cat',
+            three: 'text',
+        };
+
+        async function initHandLandmarker() {
+            const vision = await FilesetResolver.forVisionTasks(
+                'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
+            );
+            handLandmarker = await HandLandmarker.createFromOptions(vision, {
+                baseOptions: {
+                    modelAssetPath:
+                        'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+                    delegate: 'GPU',
+                },
+                runningMode: 'VIDEO',
+                numHands: 1,
+            });
+        }
+
+        function detectHands() {
+            if (!handLandmarker || !cameraReady || video.readyState < 2) return;
+            const now = performance.now();
+            if (now - lastHandTs < 33) return;
+            lastHandTs = now;
+
+            const result = handLandmarker.detectForVideo(video, now);
+            const landmarks =
+                result.landmarks && result.landmarks.length > 0
+                    ? result.landmarks[0]
+                    : null;
+            activeGesture = classifyGesture(landmarks);
+
+            // 边沿触发：手势出现一次就切换对应形状
+            if (activeGesture && activeGesture !== prevGesture && shapesReady) {
+                const shape = GESTURE_TO_SHAPE[activeGesture];
+                if (shape) setShape(shape);
+            }
+            prevGesture = activeGesture;
+        }
+
+        function updateParticles(t, dt) {
+            if (currentShape) {
+                morphAmount = Math.min(1, morphAmount + dt * 1.7);
+            }
+
+            const pos = geometry.attributes.position.array;
+            const col = geometry.attributes.color.array;
+            const m = currentShape ? morphAmount : 0;
+            const inv = 1 - m;
+
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const i3 = i * 3;
+
+                let tx, ty, tz, cr, cg, cb;
+                if (currentShape) {
+                    tx = toPositions[i3] * m + fromPositions[i3] * inv;
+                    ty = toPositions[i3 + 1] * m + fromPositions[i3 + 1] * inv;
+                    tz = toPositions[i3 + 2] * m + fromPositions[i3 + 2] * inv;
+                    cr = toColors[i3] * m + fromColors[i3] * inv;
+                    cg = toColors[i3 + 1] * m + fromColors[i3 + 1] * inv;
+                    cb = toColors[i3 + 2] * m + fromColors[i3 + 2] * inv;
+                } else {
+                    tx = scatterPositions[i3];
+                    ty = scatterPositions[i3 + 1];
+                    tz = scatterPositions[i3 + 2];
+                    cr = scatterColors[i3];
+                    cg = scatterColors[i3 + 1];
+                    cb = scatterColors[i3 + 2];
+                }
+
+                const drift = inv * 0.35;
+                const ox = Math.sin(t * 0.001 + i * 0.01) * 0.015 * drift;
+                const oy = Math.cos(t * 0.0012 + i * 0.013) * 0.015 * drift;
+
+                velocities[i3] += (tx + ox - pos[i3]) * (0.08 + m * 0.12);
+                velocities[i3 + 1] += (ty + oy - pos[i3 + 1]) * (0.08 + m * 0.12);
+                velocities[i3 + 2] += (tz - pos[i3 + 2]) * (0.08 + m * 0.12);
+                velocities[i3] *= 0.78;
+                velocities[i3 + 1] *= 0.78;
+                velocities[i3 + 2] *= 0.78;
+
+                pos[i3] += velocities[i3];
+                pos[i3 + 1] += velocities[i3 + 1];
+                pos[i3 + 2] += velocities[i3 + 2];
+
+                col[i3] = cr;
+                col[i3 + 1] = cg;
+                col[i3 + 2] = cb;
+            }
+
+            geometry.attributes.position.needsUpdate = true;
+            geometry.attributes.color.needsUpdate = true;
+            points.rotation.y = Math.sin(t * 0.00012) * 0.04 * inv;
+
+            const isText = currentShape === 'text';
+            if (isText && m > 0.85) {
+                // 轮廓微流动（只动有效粒子）
+                const posArr = geometry.attributes.position.array;
+                const colArr = geometry.attributes.color.array;
+                const pulse = 0.5 + 0.5 * Math.sin(t * 0.0025);
+                const wave = TEXT_VISUAL.wave;
+                const n = Math.min(TEXT_SAMPLE_COUNT, PARTICLE_COUNT);
+                for (let i = 0; i < n; i++) {
+                    const i3 = i * 3;
+                    const bx = toPositions[i3];
+                    const by = toPositions[i3 + 1];
+                    const bz = toPositions[i3 + 2];
+                    posArr[i3] = bx + Math.sin(t * 0.0018 + i * 0.07) * wave;
+                    posArr[i3 + 1] = by + Math.cos(t * 0.0021 + i * 0.05) * wave * 0.8;
+                    posArr[i3 + 2] = bz;
+                    const p = TEXT_VISUAL.colorPulse * pulse * 0.3;
+                    colArr[i3] = Math.min(1, toColors[i3] + p);
+                    colArr[i3 + 1] = Math.min(1, toColors[i3 + 1] + p * 0.65);
+                    colArr[i3 + 2] = Math.min(1, toColors[i3 + 2] + p * 0.3);
+                }
+                geometry.attributes.position.needsUpdate = true;
+                geometry.attributes.color.needsUpdate = true;
+            }
+
+            const baseSize = isText ? 0.02 : 0.028;
+            const shapedSize = isText ? TEXT_VISUAL.particleSize : 0.018;
+            material.size = baseSize * (1 - m * 0.25) + shapedSize * m;
+        }
+
+        const GESTURE_LABELS = {
+            ok: 'OK',
+            one: '比1',
+            two: '比2',
+            three: '比3',
+        };
+
+        let lastT = performance.now();
+        function animate(t) {
+            requestAnimationFrame(animate);
+            const dt = Math.min(0.05, (t - lastT) / 1000);
+            lastT = t;
+            detectHands();
+            updateParticles(t, dt);
+            updateFireworks(dt);
+            renderer.render(scene, camera);
+
+            if (!shapesReady) return;
+            if (!cameraReady) {
+                statusEl.textContent = '形状已就绪 · 点击开启摄像头';
+                return;
+            }
+            const mode = currentShape
+                ? SHAPE_LABELS[currentShape]
+                : '散开';
+            const gesture = activeGesture
+                ? GESTURE_LABELS[activeGesture]
+                : '等待手势';
+            statusEl.textContent = `当前：${mode} · 识别：${gesture} · 粒子 ${PARTICLE_COUNT}`;
+        }
+        requestAnimationFrame(animate);
+
+        async function startCamera() {
+            try {
+                startBtn.disabled = true;
+                statusEl.textContent = '加载 MediaPipe Hands…';
+                await initHandLandmarker();
+
+                statusEl.textContent = '请求摄像头权限…';
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        facingMode: 'user',
+                        width: { ideal: 640 },
+                        height: { ideal: 480 },
+                    },
+                    audio: false,
+                });
+                video.srcObject = stream;
+                await video.play();
+                cameraReady = true;
+                startBtn.classList.add('hidden');
+                manualBtns.classList.add('visible');
+                statusEl.textContent = '摄像头已连接 · OK/1/2/3 切换形状';
+            } catch (err) {
+                console.error(err);
+                cameraReady = false;
+                startBtn.classList.add('hidden');
+                manualBtns.classList.add('visible');
+                statusEl.textContent = '摄像头不可用 · 用右上角按钮切换形状';
+            }
+        }
+
+        startBtn.addEventListener('click', startCamera);
+
+        manualBtns.addEventListener('click', (e) => {
+            const btn = e.target.closest('button[data-shape]');
+            if (!btn) return;
+            setShape(btn.dataset.shape);
+        });
+
+        window.addEventListener('keydown', (e) => {
+            if (e.code === 'Digit0' || e.code === 'Space') {
+                e.preventDefault();
+                setShape('seal');
+            } else if (e.code === 'Digit1') {
+                setShape('weiwei');
+            } else if (e.code === 'Digit2') {
+                setShape('cat');
+            } else if (e.code === 'Digit3') {
+                setShape('text');
+            }
+        });
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
