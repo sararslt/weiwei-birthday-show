@@ -84,10 +84,20 @@
         }
         #start-btn {
             position: absolute;
-            inset: 0;
-            margin: auto;
-            width: max-content;
-            height: max-content;
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 20;
+            min-width: 220px;
+            min-height: 48px;
+            padding: 14px 28px;
+            font-size: 16px;
+            -webkit-tap-highlight-color: transparent;
+            touch-action: manipulation;
+            pointer-events: auto;
+        }
+        #start-btn:disabled {
+            opacity: 0.75;
         }
         #manual-btns {
             position: absolute;
@@ -143,12 +153,10 @@
             loadShapePointsFromCanvas,
         } from './loadShapePoints.js';
         import { fitPointsToView } from './sampleCanvas.js';
-        import {
-            FilesetResolver,
-            HandLandmarker,
-        } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/+esm';
 
-        const PARTICLE_COUNT = 28000;
+        // MediaPipe 改为点击后再动态加载，避免手机端一进页就卡死/脚本失败
+        const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+        const PARTICLE_COUNT = isMobile ? 14000 : 28000;
         // 自绘汉字笔画 + 更大华丽蛋糕
         const TEXT_VIEW = {
             width: 8.0,
@@ -854,19 +862,87 @@
             three: 'text',
         };
 
-        async function initHandLandmarker() {
+        function withTimeout(promise, ms, label) {
+            return Promise.race([
+                promise,
+                new Promise((_, reject) =>
+                    setTimeout(() => reject(new Error(`${label} 超时（${ms / 1000}s）`)), ms)
+                ),
+            ]);
+        }
+
+        async function createLandmarker(FilesetResolver, HandLandmarker, delegate) {
             const vision = await FilesetResolver.forVisionTasks(
                 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
             );
-            handLandmarker = await HandLandmarker.createFromOptions(vision, {
+            return HandLandmarker.createFromOptions(vision, {
                 baseOptions: {
                     modelAssetPath:
                         'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
-                    delegate: 'GPU',
+                    delegate,
                 },
                 runningMode: 'VIDEO',
                 numHands: 1,
             });
+        }
+
+        async function initHandLandmarker() {
+            if (handLandmarker) return true;
+            statusEl.textContent = '加载手势模型…（手机端可能需十几秒）';
+            const mod = await withTimeout(
+                import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/+esm'),
+                25000,
+                '手势库下载'
+            );
+            const { FilesetResolver, HandLandmarker } = mod;
+
+            // 手机优先 CPU，更稳；失败再试 GPU
+            const delegates = isMobile ? ['CPU', 'GPU'] : ['GPU', 'CPU'];
+            let lastErr = null;
+            for (const delegate of delegates) {
+                try {
+                    statusEl.textContent = `初始化手势识别（${delegate}）…`;
+                    handLandmarker = await withTimeout(
+                        createLandmarker(FilesetResolver, HandLandmarker, delegate),
+                        20000,
+                        `手势模型 ${delegate}`
+                    );
+                    return true;
+                } catch (err) {
+                    lastErr = err;
+                    console.warn(`HandLandmarker ${delegate} failed`, err);
+                    handLandmarker = null;
+                }
+            }
+            throw lastErr || new Error('手势模型加载失败');
+        }
+
+        async function openCameraStream() {
+            if (!navigator.mediaDevices?.getUserMedia) {
+                throw new Error('当前浏览器不支持摄像头（请用 Chrome / Safari 打开）');
+            }
+            // 手机端约束越简单越不容易失败
+            const attempts = [
+                { video: { facingMode: { ideal: 'user' } }, audio: false },
+                { video: true, audio: false },
+                {
+                    video: {
+                        facingMode: 'user',
+                        width: { ideal: 640 },
+                        height: { ideal: 480 },
+                    },
+                    audio: false,
+                },
+            ];
+            let lastErr = null;
+            for (const constraints of attempts) {
+                try {
+                    return await navigator.mediaDevices.getUserMedia(constraints);
+                } catch (err) {
+                    lastErr = err;
+                }
+            }
+            throw lastErr || new Error('无法打开摄像头');
         }
 
         function detectHands() {
@@ -1006,37 +1082,60 @@
         }
         requestAnimationFrame(animate);
 
-        async function startCamera() {
-            try {
-                startBtn.disabled = true;
-                statusEl.textContent = '加载 MediaPipe Hands…';
-                await initHandLandmarker();
+        let starting = false;
+        async function startCamera(ev) {
+            ev?.preventDefault?.();
+            if (starting) return;
+            starting = true;
+            startBtn.disabled = true;
+            startBtn.textContent = '启动中…';
 
-                statusEl.textContent = '请求摄像头权限…';
-                const stream = await navigator.mediaDevices.getUserMedia({
-                    video: {
-                        facingMode: 'user',
-                        width: { ideal: 640 },
-                        height: { ideal: 480 },
-                    },
-                    audio: false,
-                });
+            try {
+                // 先开摄像头（必须紧跟用户点击，否则手机常被拦截）
+                statusEl.textContent = '请求摄像头权限…请点「允许」';
+                const stream = await openCameraStream();
+                video.setAttribute('playsinline', 'true');
+                video.setAttribute('webkit-playsinline', 'true');
+                video.muted = true;
                 video.srcObject = stream;
-                await video.play();
+                try {
+                    await video.play();
+                } catch (playErr) {
+                    console.warn('video.play failed', playErr);
+                }
                 cameraReady = true;
-                startBtn.classList.add('hidden');
                 manualBtns.classList.add('visible');
-                statusEl.textContent = '摄像头已连接 · OK/1/2/3 切换形状';
+                statusEl.textContent = '摄像头已开 · 正在加载手势识别…';
+
+                try {
+                    await initHandLandmarker();
+                    startBtn.classList.add('hidden');
+                    statusEl.textContent = '手势已就绪 · 比 OK/1/2/3 切换形状';
+                } catch (handErr) {
+                    console.error(handErr);
+                    startBtn.classList.add('hidden');
+                    statusEl.textContent =
+                        '摄像头可用，但手势加载失败 · 请用右上角按钮切换（建议 Chrome 打开）';
+                }
             } catch (err) {
                 console.error(err);
                 cameraReady = false;
-                startBtn.classList.add('hidden');
+                starting = false;
+                startBtn.disabled = false;
+                startBtn.textContent = '重试开启摄像头';
+                const tip = /WeChat|MicroMessenger/i.test(navigator.userAgent)
+                    ? '微信内请点右上角「在浏览器中打开」'
+                    : '请允许摄像头，或改用 Chrome / Safari';
+                statusEl.textContent = `启动失败：${err?.message || err} · ${tip}`;
                 manualBtns.classList.add('visible');
-                statusEl.textContent = '摄像头不可用 · 用右上角按钮切换形状';
             }
         }
 
         startBtn.addEventListener('click', startCamera);
+        startBtn.addEventListener('touchend', (e) => {
+            e.preventDefault();
+            startCamera(e);
+        }, { passive: false });
 
         manualBtns.addEventListener('click', (e) => {
             const btn = e.target.closest('button[data-shape]');
