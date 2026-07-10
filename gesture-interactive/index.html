@@ -130,7 +130,7 @@
         </p>
     </div>
     <div id="status">正在加载形状…</div>
-    <button id="start-btn" type="button">开启摄像头并开始</button>
+    <button id="start-btn" type="button" onclick="window.__onStart&&window.__onStart(event)">开启摄像头并开始</button>
     <div id="manual-btns">
         <button type="button" data-shape="seal">OK 海豹</button>
         <button type="button" data-shape="weiwei">1 炜炜</button>
@@ -173,7 +173,7 @@
             colorPulse: 0.14,
         };
         // 笔画粒子：够读清，又不过密
-        const TEXT_SAMPLE_COUNT = 14000;
+        const TEXT_SAMPLE_COUNT = isMobile ? 8000 : 14000;
         const SHAPE_LABELS = {
             seal: '海豹',
             weiwei: '炜炜',
@@ -189,6 +189,50 @@
         const bgm = document.getElementById('bgm');
         bgm.volume = 0.55;
         let bgmStarted = false;
+        let starting = false;
+        let shapesReady = false;
+        let cameraReady = false;
+        let pendingStart = false;
+
+        // 立刻可点：不要等图片采样完才绑定（安卓慢网会像“没反应”）
+        startBtn.disabled = false;
+        startBtn.textContent = '开启摄像头并开始';
+        statusEl.textContent = '点击下方按钮开启摄像头（资源后台加载中）';
+
+        // 早期占位：真实 startCamera 定义后会替换
+        let startCameraImpl = null;
+        window.__onStart = (ev) => {
+            ev?.preventDefault?.();
+            statusEl.textContent = '已收到点击…';
+            if (typeof startCameraImpl === 'function') {
+                startCameraImpl(ev);
+            } else {
+                pendingStart = true;
+                startBtn.disabled = true;
+                startBtn.textContent = '启动中…';
+                statusEl.textContent = '已点击 · 页面初始化中，马上请求摄像头…';
+            }
+        };
+        startBtn.addEventListener('click', window.__onStart);
+        startBtn.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            window.__onStart(e);
+        }, { passive: false });
+
+        // 旧安卓 WebView 兼容
+        if (!navigator.mediaDevices) navigator.mediaDevices = {};
+        if (!navigator.mediaDevices.getUserMedia) {
+            const legacy =
+                navigator.getUserMedia ||
+                navigator.webkitGetUserMedia ||
+                navigator.mozGetUserMedia;
+            if (legacy) {
+                navigator.mediaDevices.getUserMedia = (constraints) =>
+                    new Promise((resolve, reject) =>
+                        legacy.call(navigator, constraints, resolve, reject)
+                    );
+            }
+        }
 
         function startBirthdayMusic() {
             if (bgmStarted) return;
@@ -215,8 +259,12 @@
         );
         camera.position.set(0, 0, 8.5);
 
-        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
-        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        const renderer = new THREE.WebGLRenderer({
+            antialias: !isMobile,
+            alpha: false,
+            powerPreference: isMobile ? 'low-power' : 'high-performance',
+        });
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, isMobile ? 1.5 : 2));
         renderer.setSize(window.innerWidth, window.innerHeight);
         renderer.setClearColor(0x050508, 1);
         container.appendChild(renderer.domElement);
@@ -319,12 +367,10 @@
             scene.fog.density = isText ? 0.01 : 0.02;
         }
 
-        let shapesReady = false;
         let morphAmount = 1;
         let currentShape = null; // null = scatter
         let handLandmarker = null;
         let lastHandTs = -1;
-        let cameraReady = false;
         let prevGesture = null;
         let activeGesture = null;
 
@@ -732,21 +778,22 @@
             }
         }
 
-        // seal/weiwei/cat 复用素材；文字改为自绘汉字笔画粒子
-        try {
+        // seal/weiwei/cat 复用素材；文字改为自绘汉字笔画粒子（后台加载，不阻塞按钮）
+        async function loadAllShapes() {
             statusEl.textContent = '正在采样海豹 / 炜炜 / 猫 / 自绘生日快乐文字…';
+            const sampleMax = isMobile ? 900 : 1600;
             const [sealPts, weiweiPts, catPts] = await Promise.all([
                 loadShapePoints('./seal.png', PARTICLE_COUNT, 'outline', {
                     scale: 2.35,
-                    sampleMaxSize: 1600,
+                    sampleMaxSize: sampleMax,
                 }),
                 loadShapePoints('./weiwei.png', PARTICLE_COUNT, 'fill', {
                     scale: 2.2,
-                    sampleMaxSize: 1600,
+                    sampleMaxSize: sampleMax,
                 }),
                 loadShapePoints('./cat.png', PARTICLE_COUNT, 'fill', {
                     scale: 2.1,
-                    sampleMaxSize: 1600,
+                    sampleMaxSize: sampleMax,
                 }),
             ]);
 
@@ -756,7 +803,7 @@
                 textCanvas.ctx,
                 textCanvas.width,
                 textCanvas.height,
-                TEXT_SAMPLE_COUNT,
+                Math.min(TEXT_SAMPLE_COUNT, PARTICLE_COUNT),
                 'fill'
             );
             const textPts = fitPointsToView(
@@ -776,11 +823,21 @@
             shapeBuffers.text = pointsToBuffers(textPts, { textOutline: true });
 
             shapesReady = true;
-            statusEl.textContent = '形状已就绪 · 点击开启摄像头';
-        } catch (err) {
-            console.error(err);
-            statusEl.textContent = '形状加载失败，请确认 seal/weiwei/cat.png 可访问';
+            if (!cameraReady && !starting) {
+                statusEl.textContent = '形状已就绪 · 点击开启摄像头';
+            } else if (cameraReady) {
+                statusEl.textContent = '形状已就绪 · 可比 OK/1/2/3';
+            }
+            if (pendingStart) {
+                pendingStart = false;
+                startCamera();
+            }
         }
+
+        loadAllShapes().catch((err) => {
+            console.error(err);
+            statusEl.textContent = '形状加载失败，请刷新重试（请用 Chrome 打开）';
+        });
 
         function dist2d(a, b) {
             return Math.hypot(a.x - b.x, a.y - b.y);
@@ -1067,7 +1124,14 @@
             updateFireworks(dt);
             renderer.render(scene, camera);
 
-            if (!shapesReady) return;
+            if (!shapesReady) {
+                if (!cameraReady) {
+                    statusEl.textContent = starting
+                        ? '启动中…资源仍在加载'
+                        : '资源加载中…可先点开启摄像头';
+                }
+                return;
+            }
             if (!cameraReady) {
                 statusEl.textContent = '形状已就绪 · 点击开启摄像头';
                 return;
@@ -1082,22 +1146,31 @@
         }
         requestAnimationFrame(animate);
 
-        let starting = false;
+        let startingLock = false;
         async function startCamera(ev) {
             ev?.preventDefault?.();
-            if (starting) return;
+            if (startingLock) return;
+            startingLock = true;
             starting = true;
             startBtn.disabled = true;
             startBtn.textContent = '启动中…';
+            statusEl.textContent = '已收到点击 · 请求摄像头权限…请点「允许」';
 
             try {
-                // 先开摄像头（必须紧跟用户点击，否则手机常被拦截）
-                statusEl.textContent = '请求摄像头权限…请点「允许」';
+                // 先开摄像头（必须紧跟用户点击，否则安卓常被拦截）
                 const stream = await openCameraStream();
                 video.setAttribute('playsinline', 'true');
                 video.setAttribute('webkit-playsinline', 'true');
                 video.muted = true;
+                video.playsInline = true;
                 video.srcObject = stream;
+                // 安卓：等元数据再 play 更稳
+                if (video.readyState < 2) {
+                    await Promise.race([
+                        new Promise((r) => video.addEventListener('loadedmetadata', r, { once: true })),
+                        new Promise((r) => setTimeout(r, 1500)),
+                    ]);
+                }
                 try {
                     await video.play();
                 } catch (playErr) {
@@ -1110,32 +1183,42 @@
                 try {
                     await initHandLandmarker();
                     startBtn.classList.add('hidden');
-                    statusEl.textContent = '手势已就绪 · 比 OK/1/2/3 切换形状';
+                    statusEl.textContent = shapesReady
+                        ? '手势已就绪 · 比 OK/1/2/3 切换形状'
+                        : '手势已就绪 · 形状仍在加载，稍候可变形';
                 } catch (handErr) {
                     console.error(handErr);
                     startBtn.classList.add('hidden');
                     statusEl.textContent =
-                        '摄像头可用，但手势加载失败 · 请用右上角按钮切换（建议 Chrome 打开）';
+                        '摄像头可用，但手势加载失败 · 请用右上角按钮（建议 Chrome）';
                 }
             } catch (err) {
                 console.error(err);
                 cameraReady = false;
                 starting = false;
+                startingLock = false;
                 startBtn.disabled = false;
                 startBtn.textContent = '重试开启摄像头';
                 const tip = /WeChat|MicroMessenger/i.test(navigator.userAgent)
-                    ? '微信内请点右上角「在浏览器中打开」'
-                    : '请允许摄像头，或改用 Chrome / Safari';
-                statusEl.textContent = `启动失败：${err?.message || err} · ${tip}`;
+                    ? '微信内请点右上角「···」→「在浏览器中打开」'
+                    : '请允许摄像头权限，并用 Chrome 打开';
+                statusEl.textContent = `启动失败：${err?.name || ''} ${err?.message || err} · ${tip}`;
                 manualBtns.classList.add('visible');
+                return;
             }
+            starting = false;
         }
 
-        startBtn.addEventListener('click', startCamera);
-        startBtn.addEventListener('touchend', (e) => {
-            e.preventDefault();
-            startCamera(e);
-        }, { passive: false });
+        // 替换早期占位，并处理“初始化前就点了”的情况
+        startCameraImpl = startCamera;
+        window.__onStart = (ev) => {
+            ev?.preventDefault?.();
+            startCamera(ev);
+        };
+        if (pendingStart) {
+            pendingStart = false;
+            startCamera();
+        }
 
         manualBtns.addEventListener('click', (e) => {
             const btn = e.target.closest('button[data-shape]');
